@@ -144,7 +144,7 @@ Usage: elasticdump --input SOURCE --output DESTINATION [OPTIONS]
 
 --retryDelay
                     Integer indicating the back-off/break period between retry attempts (milliseconds)
-                    (default : 5000)    
+                    (default : 5000)
 --help
                     This page
 
