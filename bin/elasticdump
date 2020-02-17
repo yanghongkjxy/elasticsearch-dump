@@ -1,14 +1,15 @@
 #!/usr/bin/env node
 
-var argv = require('optimist').argv
-var path = require('path')
-var fs = require('fs')
-var Elasticdump = require(path.join(__dirname, '..', 'elasticdump.js'))
-var packageData = require(path.join(__dirname, '..', 'package.json'))
-var isUrl = require(path.join(__dirname, '..', 'lib', 'is-url.js'))
+const { argv } = require('optimist')
+const path = require('path')
+const fs = require('fs')
+const Elasticdump = require(path.join(__dirname, '..', 'elasticdump.js'))
+const packageData = require(path.join(__dirname, '..', 'package.json'))
+const isUrl = require(path.join(__dirname, '..', 'lib', 'is-url.js'))
+const ArgParser = require(path.join(__dirname, '..', 'lib', 'argv.js'))
 
 // For future developers.  If you add options here, be sure to add the option to test suite tests where necessary
-var defaults = {
+const defaults = {
   size: -1,
   limit: 100,
   offset: 0,
@@ -38,10 +39,16 @@ var defaults = {
   awsAccessKeyId: null,
   awsSecretAccessKey: null,
   awsIniFileProfile: null,
+  awsService: null,
+  awsRegion: null,
   s3AccessKeyId: null,
   s3SecretAccessKey: null,
-  s3Bucket: null,
-  s3RecordKey: null,
+  s3Region: null,
+  s3Endpoint: null,
+  s3SSLEnabled: true,
+  s3ForcePathStyle: false,
+  s3Compress: false,
+  fsCompress: false,
   awsIniFileName: null,
   sessionToken: null,
   transform: null,
@@ -50,62 +57,60 @@ var defaults = {
   prefix: '',
   suffix: '',
   retryAttempts: 0,
+  customBackoff: false,
+  retryDelayBase: 0,
   retryDelay: 5000,
   parseExtraFields: '',
-  fileSize: -1
+  fileSize: -1,
+  cert: null,
+  key: null,
+  pass: null,
+  ca: null,
+  tlsAuth: false,
+  'input-cert': null,
+  'input-key': null,
+  'input-pass': null,
+  'input-ca': null,
+  'output-cert': null,
+  'output-key': null,
+  'output-pass': null,
+  'output-ca': null,
+  inputSocksProxy: null,
+  inputSocksPort: null,
+  outputSocksProxy: null,
+  outputSocksPort: null,
+  concurrency: 1,
+  throttleInterval: 1,
+  carryoverConcurrencyCount: true,
+  intervalCap: 5,
+  concurrencyInterval: 5000,
+  overwrite: false,
+  handleVersion: false,
+  versionType: null
 }
-var jsonParsedOpts = ['searchBody', 'headers', 'params']
-var options = {}
+const options = {}
 
-// parse passed options & use defaults otherwise
-for (var i in defaults) {
-  options[i] = argv[i] || defaults[i]
-
-  if (options[i] === 'true') { options[i] = true }
-  if (options[i] === 'false') { options[i] = false }
-}
-
-// parse whitelisted json formatted options
-for (var i of jsonParsedOpts) {
-  if (options[i]) { options[i] = JSON.parse(options[i]) }
-}
-
-var log = function (type, message) {
-  if (type === 'debug') {
-    if (options.debug === true) {
-      message = new Date().toUTCString() + ' [debug] | ' + message
-      console.log(message)
-    } else {
-      return false
-    }
-  } else if (type === 'error') {
-    message = (new Date().toUTCString()) + ' | ' + message
-    console.error(message)
-  } else if (options.quiet === false) {
-    message = (new Date().toUTCString()) + ' | ' + message
-    console.log(message)
-  } else {
-    return false
-  }
-}
+const args = new ArgParser({ options, parseJSONOpts: true })
+args.parse(argv, defaults)
 
 if (argv.help === true) {
-  var helpText = require('fs').readFileSync(path.join(__dirname, '..', 'lib', 'help.txt'))
+  let helpText = require('fs').readFileSync(path.join(__dirname, '..', 'lib', 'help.txt'))
   helpText = helpText.toString()
   helpText = helpText.replace('%%version%%', packageData.version)
   console.log(helpText)
 } else if (argv.version === true) {
   console.log(packageData.version)
 } else {
-  if (options.output !== '$' && !isUrl(options.output) && fs.existsSync(options.output)) {
-    throw new Error('File `' + options.output + '` already exists, quitting')
+  if (!options.overwrite && options.output !== '$' && !isUrl(options.output) && fs.existsSync(options.output)) {
+    console.error(`File \`${options.output}\` already exists, quitting`)
+    process.exit(1)
   }
 
-  var dumper = new Elasticdump(options.input, options.output, options)
+  const dumper = new Elasticdump(options.input, options.output, options)
 
-  dumper.on('log', function (message) { log('log', message) })
-  dumper.on('debug', function (message) { log('debug', message) })
-  dumper.on('error', function (error) { log('error', 'Error Emitted => ' + (error.message || JSON.stringify(error))) })
+  dumper.on('log', function (message) { args.log('log', message) })
+  dumper.on('debug', function (message) { args.log('debug', message) })
+  dumper.on('error', function (error) { args.log('error', `Error Emitted => ${error.message || JSON.stringify(error)}`) })
 
   dumper.dump(function (error) {
     if (error) {

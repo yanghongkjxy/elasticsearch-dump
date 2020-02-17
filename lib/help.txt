@@ -13,6 +13,9 @@ Usage: elasticdump --input SOURCE --output DESTINATION [OPTIONS]
 --output-index
                     Destination index and type
                     (default: all, example: index/type)
+--overwrite
+                    Overwrite output file if it exists
+                    (default: false)
 --limit
                     How many objects to move in batch per operation
                     limit is approximate for file streams
@@ -21,6 +24,30 @@ Usage: elasticdump --input SOURCE --output DESTINATION [OPTIONS]
 --size
                     How many objects to retrieve
                     (default: -1 -> no limit)
+
+--concurrency
+                    How many concurrent request is sent to a specified transport
+                    (default: 1)
+
+--concurrencyInterval
+                    The length of time in milliseconds before the interval count resets. Must be finite.
+                    (default: 5000)
+
+--intervalCap
+                    The max number of transport request in the given interval of time.
+                    (default: 5)
+
+--carryoverConcurrencyCount
+                    Whether the task must finish in the given concurrencyInterval
+                    (intervalCap will reset to the default whether the request is completed or not)
+                    or will be carried over into the next interval count,
+                    which will effectively reduce the number of new requests created in the next interval
+                    i.e. intervalCap -= <num of carried over requests>
+                    (default: true)
+
+--throttleInterval
+                    The length of time in milliseconds to delay between getting data from an inputTransport and sending it to an outputTransport
+                    (default: 1)
 
 --debug
                     Display the elasticsearch commands being used
@@ -121,6 +148,12 @@ Usage: elasticdump --input SOURCE --output DESTINATION [OPTIONS]
                     For greater flexibility, consider using --awsChain
                     and setting AWS_PROFILE and AWS_CONFIG_FILE
                     environment variables to override defaults if needed
+--awsService
+                    Sets the AWS service that the signature will be generated for
+                    (default: calculated from hostname or host)
+--awsRegion
+                    Sets the AWS region that the signature will be generated for
+                    (default: calculated from hostname or host)
 --transform
                     A javascript, which will be called to modify documents
                     before writing it to destination. global variable 'doc'
@@ -159,15 +192,52 @@ Usage: elasticdump --input SOURCE --output DESTINATION [OPTIONS]
                     e.g. 10mb / 1gb / 1tb
                     Partitioning helps to alleviate overflow/out of memory exceptions by efficiently segmenting files
                     into smaller chunks that then be merged if needs be.
-
+--fsCompress
+                    gzip data before sending outputting to file
 --s3AccessKeyId
                     AWS access key ID
 --s3SecretAccessKey
                     AWS secret access key
---s3Bucket
-                    Name of the bucket to which the data will be uploaded
---s3RecordKey
-                    Object key (filename) for the data to be uploaded
+--s3Region
+                    AWS region
+--s3Endpoint
+                    AWS endpoint can be used for AWS compatible backends such as
+                    OpenStack Swift and OpenStack Ceph
+--s3SSLEnabled
+                    Use SSL to connect to AWS [default true]
+
+--s3ForcePathStyle  Force path style URLs for S3 objects [default false]
+
+--s3Compress
+                    gzip data before sending to s3
+--retryDelayBase
+                    The base number of milliseconds to use in the exponential backoff for operation retries. (s3)
+--customBackoff
+                    Activate custom customBackoff function. (s3)
+--tlsAuth
+                    Enable TLS X509 client authentication
+--cert, --input-cert, --output-cert
+                    Client certificate file. Use --cert if source and destination are identical.
+                    Otherwise, use the one prefixed with --input or --output as needed.
+--key, --input-key, --output-key
+                    Private key file. Use --key if source and destination are identical.
+                    Otherwise, use the one prefixed with --input or --output as needed.
+--pass, --input-pass, --output-pass
+                    Pass phrase for the private key. Use --pass if source and destination are identical.
+                    Otherwise, use the one prefixed with --input or --output as needed.
+--ca, --input-ca, --output-ca
+                    CA certificate. Use --ca if source and destination are identical.
+                    Otherwise, use the one prefixed with --input or --output as needed.
+--inputSocksProxy, --outputSocksProxy
+                    Socks5 host address
+--inputSocksPort, --outputSocksPort
+                    Socks5 host port
+--handleVersion
+                    Tells elastisearch transport to handle the `_version` field if present in the dataset
+                    (default : false)
+--versionType
+                    Elasticsearch versioning types. Should be `internal`, `external`, `external_gte`, `force`.
+                    NB : Type validation is handle by the bulk endpoint and not elasticsearch-dump
 --help
                     This page
 

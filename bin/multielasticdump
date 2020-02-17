@@ -6,29 +6,24 @@
 // dump --input must be a URL and --output must be a path on this system
 // index --input must be a a path on this system --output must be URL
 
-var argv = require('optimist').argv
-var fs = require('fs')
-var os = require('os')
-var path = require('path')
-var async = require('async')
-var request = require('request')
-var fork = require('child_process').fork
-var _ = require('lodash')
+const { argv } = require('optimist')
+const fs = require('fs')
+const os = require('os')
+const path = require('path')
+const async = require('async')
+const request = require('request')
+const { fork } = require('child_process')
+const _ = require('lodash')
+const ArgParser = require(path.join(__dirname, '..', 'lib', 'argv.js'))
 
-var options = {}
-var matchedIndexes = []
-var working = 0
-var complete = 0
-var indexCounter = 0
-var workTimeout
+const options = {}
+let matchedIndexes = []
+let working = 0
+let complete = 0
+let indexCounter = 0
+let workTimeout
 
-function unique (arr, keepLast) {
-  return arr.filter(function (value, index, array) {
-    return keepLast ? array.indexOf(value, index + 1) < 0 : array.indexOf(value) === index
-  })
-}
-
-var defaults = {
+const defaults = {
   debug: true,
   parallel: os.cpus().length,
   match: '^.*$',
@@ -39,99 +34,181 @@ var defaults = {
   limit: 100,
   offset: 0,
   direction: 'dump', // default to dump
-  ignoreAnalyzer: false,
+  'support-big-int': false,
+  ignoreAnalyzer: true,
   ignoreData: false,
   ignoreMapping: false,
+  ignoreSettings: false,
+  ignoreTemplate: false,
+  ignoreAlias: true,
   ignoreType: [],
+  includeType: null,
   interval: 1000,
   prefix: '',
   suffix: '',
-  searchBody: null
+  transform: null,
+  headers: null,
+  searchBody: null,
+  cert: null,
+  key: null,
+  pass: null,
+  ca: null,
+  tlsAuth: false,
+  'input-cert': null,
+  'input-key': null,
+  'input-pass': null,
+  'input-ca': null,
+  'output-cert': null,
+  'output-key': null,
+  'output-pass': null,
+  'output-ca': null,
+  concurrency: 1,
+  carryoverConcurrencyCount: true,
+  intervalCap: 5,
+  concurrencyInterval: 5000,
+  overwrite: false,
+  fsCompress: false,
+  quiet: false
 }
 
-for (var i in defaults) {
-  options[i] = defaults[i]
-  if (argv[i]) {
-    options[i] = argv[i]
-  }
-  if (options[i] === 'true') { options[i] = true }
-  if (options[i] === 'false') { options[i] = false }
-  if (i === 'interval' && _.isNumber(argv[i])) {
-    // special case to handle value == 0
-    options[i] = argv[i]
-  }
-}
+const args = new ArgParser({ options })
+args.parse(argv, defaults)
 
-_.split(options.ignoreType, ',').forEach(function (field) {
-  var key = `ignore${_.upperFirst(field)}`
+_.split(options.ignoreType, ',').forEach(field => {
+  const key = `ignore${_.upperFirst(field)}`
   if (_.has(options, key)) {
     options[key] = true
   }
 })
 
-var log = function (type, message) {
-  if (type === 'debug') {
-    if (options.debug === true) {
-      message = '[debug] | ' + message
+if (options.includeType) {
+  const ignoreKeys = _.keys(options).filter((key) => key.startsWith('ignore'))
+  const includedKeys = _.split(options.includeType, ',')
+  ignoreKeys.forEach(k => {
+    options[k] = _.indexOf(includedKeys, _.toLower(/^ignore(.*)$/.exec(k)[1])) <= -1
+  })
+}
+
+const commonParams = [
+  `--headers=${options.headers}`,
+  `--cert=${options.cert}`,
+  `--key=${options.key}`,
+  `--pass=${options.pass}`,
+  `--ca=${options.ca}`,
+  `--tlsAuth=${options.tlsAuth}`,
+  `--input-cert=${options['input-cert']}`,
+  `--input-key=${options['input-key']}`,
+  `--input-pass=${options['input-pass']}`,
+  `--input-ca=${options['input-ca']}`,
+  `--output-cert=${options['output-cert']}`,
+  `--output-key=${options['output-key']}`,
+  `--output-pass=${options['output-pass']}`,
+  `--output-ca=${options['output-ca']}`,
+  `--concurrency=${options.concurrency}`,
+  `--carryoverConcurrencyCount=${options.carryoverConcurrencyCount}`,
+  `--intervalCap=${options.intervalCap}`,
+  `--concurrencyInterval=${options.concurrencyInterval}`,
+  `--overwrite=${options.overwrite}`,
+  `--fsCompress=${options.fsCompress}`,
+  `--quiet=${options.quiet}`
+]
+
+const fileExt = options.fsCompress ? 'json.gz' : 'json'
+
+const validateDirectory = (options, field) => {
+  let isDir
+  try {
+    isDir = fs.lstatSync(options[field]).isDirectory()
+  } catch (e) {
+    // Handle error
+    if (e.code === 'ENOENT') {
+      // no such file or directory
+      console.error(`Directory --${field} : \`${options[field]}\` does not exists`)
+      process.exit(1)
     } else {
-      return false
+      // do something else
     }
-  } else {
-    message = (new Date().toUTCString()) + ' | ' + message
   }
-  console.log(message)
+
+  if (!isDir) {
+    console.error(`--${field} ${options[field]} is a not directory`)
+    process.exit(1)
+  }
+}
+
+const _fork = (params = [], file = 'elasticdump') => {
+  return fork(path.join(__dirname, file), params.concat(commonParams))
+}
+
+const attachListeners = (clazz, cb) => {
+  clazz.on('close', code => {
+    if (code !== 0) {
+      return cb(new Error('CHILD PROCESS EXITED WITH ERROR.  Stopping process'))
+    } else {
+      return cb()
+    }
+  }).on('error', error => args.log('error', error))
 }
 
 if (!options.input) { throw new Error('--input is required') }
 if (!options.output) { throw new Error('--output is required') }
-log('info', 'We are performing : ' + options.direction)
-log('info', 'options: ' + JSON.stringify(options))
+args.log('info', `We are performing : ${options.direction}`)
+args.log('info', `options: ${JSON.stringify(options)}`)
 
-var matchRegExp = new RegExp(options.match, 'i')
+const matchRegExp = new RegExp(options.match, 'i')
 if (options.direction === 'dump') {
-  if (!fs.existsSync(options.output)) { throw new Error('--output does not exist') }
-  request.get(options.input + '/_aliases', function (err, response) {
+  validateDirectory(options, 'output')
+  const req = {
+    url: `${options.input}/_aliases`,
+    method: 'GET',
+    headers: Object.assign({
+      'User-Agent': 'elasticdump',
+      'Content-Type': 'application/json'
+    }, JSON.parse(options.headers) || {})
+  }
+  request(req, (err, response) => {
     if (err) {
-      log('err', err)
+      args.log('err', err)
       process.exit()
     }
     response = JSON.parse(response.body)
     if (!Array.isArray(response)) {
       response = Object.keys(response)
     }
-    matchedIndexes = response.filter(function (index) {
-      return matchRegExp.test(index)
-    })
+    matchedIndexes = response.filter(index => matchRegExp.test(index))
 
     dumpWork()
   })
 }
 
 if (options.direction === 'load') {
-  if (!fs.existsSync(options.input)) { throw new Error('--input() does not exist') }
-  fs.readdir(options.input, function (err, data) {
+  validateDirectory(options, 'input')
+  fs.readdir(options.input, (err, data) => {
     if (err) {
-      log('error', err)
+      args.log('error', err)
       throw new Error('Something went wrong reading the list of files')
     }
-    // log('info', data);
-    matchedIndexes = data.map(function (value) {
-      return value.replace('.mapping.json', '').replace('.analyzer.json', '').replace('.json', '')
-    }).filter(function (item) {
-      return matchRegExp.test(item)
-    })
-    matchedIndexes = unique(matchedIndexes)
-    log('info', 'list of indexes' + JSON.stringify(matchedIndexes))
+    // args.log('info', data);
+    matchedIndexes = data.map(value => value
+      .replace(`.mapping.${fileExt}`, '')
+      .replace(`.analyzer.${fileExt}`, '')
+      .replace(`.alias.${fileExt}`, '')
+      .replace(`.settings.${fileExt}`, '')
+      .replace(`.template.${fileExt}`, '')
+      .replace(`.${fileExt}`, ''))
+      .filter(item => matchRegExp.test(item))
+    matchedIndexes = _.uniq(matchedIndexes)
+    args.log('info', `list of indexes${JSON.stringify(matchedIndexes)}`)
 
     loadWork()
   })
 }
 
-var dumpWork = function () {
+const dumpWork = () => {
   clearTimeout(workTimeout)
   if (complete === matchedIndexes.length) {
-    log('info', ' dumping all done ')
-    log('info', ' bye ')
+    args.log('info', ' dumping all done ')
+    args.log('info', ' bye ')
     process.exit()
   } else if (working === options.parallel) {
     workTimeout = setTimeout(dumpWork, options.interval)
@@ -141,11 +218,11 @@ var dumpWork = function () {
   }
 }
 
-var loadWork = function () {
+const loadWork = () => {
   clearTimeout(workTimeout)
   if (complete === matchedIndexes.length) {
-    log('info', ' indexing all done ')
-    log('info', ' bye ')
+    args.log('info', ' indexing all done ')
+    args.log('info', ' bye ')
     process.exit()
   } else if (working === options.parallel) {
     workTimeout = setTimeout(loadWork, options.interval)
@@ -155,9 +232,9 @@ var loadWork = function () {
   }
 }
 
-var dump = function () {
+const dump = () => {
   working++
-  var index = matchedIndexes[indexCounter]
+  const index = matchedIndexes[indexCounter]
 
   if (!index) {
     working--
@@ -166,77 +243,115 @@ var dump = function () {
 
   indexCounter++
 
-  var input = options.input + '/' + encodeURIComponent(index).toLowerCase()
-  var outputData = options.output + '/' + index + '.json'
-  var outputMapping = options.output + '/' + index + '.mapping.json'
-  var outputAnalyzer = options.output + '/' + index + '.analyzer.json'
+  const input = `${options.input}/${encodeURIComponent(index).toLowerCase()}`
+  const outputData = `${options.output}/${index}.${fileExt}`
+  const outputMapping = `${options.output}/${index}.mapping.${fileExt}`
+  const outputAnalyzer = `${options.output}/${index}.analyzer.${fileExt}`
+  const outputAlias = `${options.output}/${index}.alias.${fileExt}`
+  const outputSettings = `${options.output}/${index}.settings.${fileExt}`
+  const outputTemplate = `${options.output}/${index}.template.${fileExt}`
+  const jobs = []
 
-  var jobs = []
+  jobs.push(done => {
+    if (options.ignoreTemplate) return done()
+    args.log('info', `dumping ${input} to ${outputTemplate}`)
 
-  jobs.push(function (done) {
+    const templateChild = _fork([
+      '--type=template',
+      `--input=${input}`,
+      `--output=${outputTemplate}`
+    ])
+
+    attachListeners(templateChild, done)
+  })
+
+  jobs.push(done => {
+    if (options.ignoreSettings) return done()
+    args.log('info', `dumping ${input} to ${outputSettings}`)
+
+    const settingsChild = _fork([
+      '--type=settings',
+      `--input=${input}`,
+      `--output=${outputSettings}`
+    ])
+
+    attachListeners(settingsChild, done)
+  })
+
+  jobs.push(done => {
     if (options.ignoreMapping) return done()
-    log('info', 'dumping ' + input + ' to ' + outputMapping)
+    args.log('info', `dumping ${input} to ${outputMapping}`)
 
-    var mappingChild = fork(path.join(__dirname, 'elasticdump'), [
-      '--type=' + 'mapping',
-      '--input=' + input,
-      '--output=' + outputMapping
+    const mappingChild = _fork([
+      '--type=mapping',
+      `--input=${input}`,
+      `--output=${outputMapping}`
     ])
 
-    mappingChild.on('close', function (code) {
-      if (code !== 0) {
-        return done(new Error('CHILD PROCESS EXITED WITH ERROR.  Stopping process'))
-      } else {
-        return done()
-      }
-    })
+    attachListeners(mappingChild, done)
   })
 
-  jobs.push(function (done) {
+  jobs.push(done => {
     if (options.ignoreAnalyzer) return done()
-    log('info', 'analyzer ' + input + ' to ' + outputAnalyzer)
+    args.log('info', `analyzer ${input} to ${outputAnalyzer}`)
 
-    var analyzerChild = fork(path.join(__dirname, 'elasticdump'), [
-      '--type=' + 'analyzer',
-      '--input=' + input,
-      '--output=' + outputAnalyzer
+    const analyzerChild = _fork([
+      '--type=analyzer',
+      `--input=${input}`,
+      `--output=${outputAnalyzer}`
     ])
 
-    analyzerChild.on('close', function (code) {
-      if (code !== 0) {
-        return done(new Error('CHILD PROCESS EXITED WITH ERROR.  Stopping process'))
-      } else {
-        return done()
-      }
-    })
+    attachListeners(analyzerChild, done)
   })
 
-  jobs.push(function (done) {
+  jobs.push(done => {
+    if (options.ignoreAlias) return done()
+    args.log('info', `analyzer ${input} to ${outputAlias}`)
+
+    const aliasChild = _fork([
+      '--type=alias',
+      `--input=${input}`,
+      `--output=${outputAlias}`
+    ])
+
+    attachListeners(aliasChild, done)
+  })
+
+  jobs.push(done => {
     if (options.ignoreData) return done()
-    log('info', 'dumping ' + input + ' to ' + outputData)
+    args.log('info', `dumping ${input} to ${outputData}`)
 
-    var dataChild = fork(path.join(__dirname, 'elasticdump'), [
-      '--type=' + 'data',
-      '--input=' + input,
-      '--output=' + outputData,
-      '--scrollTime=' + options.scrollTime,
-      '--limit=' + options.limit,
-      '--offset=' + options.offset,
-      '--searchBody=' + options.searchBody
-    ])
+    let _transform = []
 
-    dataChild.on('close', function (code) {
-      if (code !== 0) {
-        return done(new Error('CHILD PROCESS EXITED WITH ERROR.  Stopping process'))
-      } else {
-        return done()
-      }
-    })
+    if (options.transform) {
+      _transform = _.chain(options.transform)
+        .castArray()
+        .filter(_.negate(_.isEmpty))
+        .map(t => {
+          return `--transform=${t}`
+        })
+        .value()
+    }
+
+    const dataChild = _fork([
+      '--type=data',
+      `--input=${input}`,
+      `--output=${outputData}`,
+      `--scrollTime=${options.scrollTime}`,
+      `--limit=${options.limit}`,
+      `--offset=${options.offset}`,
+      `--searchBody=${options.searchBody}`,
+      `--prefix=${options.prefix}`,
+      `--suffix=${options.suffix}`,
+      `--support-big-int=${options['support-big-int']}`
+    ].concat(_transform))
+
+    attachListeners(dataChild, done)
   })
 
-  async.series(jobs, function (error) {
+  async.series(jobs, error => {
     if (error) {
-      log('error', error)
+      args.log('error', error)
       process.exit(1)
     } else {
       working--
@@ -245,92 +360,135 @@ var dump = function () {
   })
 }
 
-var load = function () {
+const load = () => {
   working++
-  var index = matchedIndexes[indexCounter]
+  const index = matchedIndexes[indexCounter]
 
   if (!index) {
     working--
     return
   }
 
-  log('info', 'Working on ' + index)
+  args.log('info', `Working on ${index}`)
 
   indexCounter++
 
-  var output = options.output + '/' + encodeURIComponent(index).toLowerCase()
-  var inputData = options.input + '/' + index + '.json'
-  var inputMapping = options.input + '/' + index + '.mapping.json'
-  var inputAnalyzer = options.input + '/' + index + '.analyzer.json'
+  const output = `${options.output}/${encodeURIComponent(index).toLowerCase()}`
+  const inputData = `${options.input}/${index}.${fileExt}`
+  const inputMapping = `${options.input}/${index}.mapping.${fileExt}`
+  const inputAnalyzer = `${options.input}/${index}.analyzer.${fileExt}`
+  const inputAlias = `${options.input}/${index}.alias.${fileExt}`
+  const inputSettings = `${options.input}/${index}.settings.${fileExt}`
+  const inputTemplate = `${options.input}/${index}.template.${fileExt}`
 
-  var jobs = []
+  const jobs = []
 
-  jobs.push(function (done) {
+  jobs.push(done => {
+    if (options.ignoreTemplate) return done()
+    args.log('info', `indexing template ${inputTemplate} to ${output}`)
+
+    const templateChild = _fork([
+      '--type=template',
+      `--input=${inputTemplate}`,
+      `--output=${output}`
+    ])
+
+    templateChild.on('close', code => {
+      if (code !== 0) {
+        return done(new Error('CHILD PROCESS EXITED WITH ERROR.  Stopping process'))
+      } else {
+        return done()
+      }
+    }).on('error', error => args.log('error', error))
+  })
+
+  jobs.push(done => {
+    if (options.ignoreSettings) return done()
+    args.log('info', `indexing settings ${inputSettings} to ${output}`)
+
+    const settingsChild = _fork([
+      '--type=settings',
+      `--input=${inputSettings}`,
+      `--output=${output}`
+    ])
+
+    attachListeners(settingsChild, done)
+  })
+
+  jobs.push(done => {
     if (options.ignoreAnalyzer) return done()
-    log('info', 'indexing analyzer ' + inputAnalyzer + ' to ' + output)
+    args.log('info', `indexing analyzer ${inputAnalyzer} to ${output}`)
 
-    var analyzerChild = fork(path.join(__dirname, 'elasticdump'), [
-      '--type=' + 'analyzer',
-      '--input=' + inputAnalyzer,
-      '--output=' + output
+    const analyzerChild = _fork([
+      '--type=analyzer',
+      `--input=${inputAnalyzer}`,
+      `--output=${output}`
     ])
 
-    analyzerChild.on('close', function (code) {
-      if (code !== 0) {
-        return done(new Error('CHILD PROCESS EXITED WITH ERROR.  Stopping process'))
-      } else {
-        return done()
-      }
-    })
+    attachListeners(analyzerChild, done)
   })
 
-  jobs.push(function (done) {
+  jobs.push(done => {
     if (options.ignoreMapping) return done()
-    log('info', 'indexing mapping ' + inputMapping + ' to ' + output)
+    args.log('info', `indexing mapping ${inputMapping} to ${output}`)
 
-    var mappingChild = fork(path.join(__dirname, 'elasticdump'), [
-      '--type=' + 'mapping',
-      '--input=' + inputMapping,
-      '--output=' + output
+    const mappingChild = _fork([
+      '--type=mapping',
+      `--input=${inputMapping}`,
+      `--output=${output}`
     ])
 
-    mappingChild.on('close', function (code) {
-      if (code !== 0) {
-        return done(new Error('CHILD PROCESS EXITED WITH ERROR.  Stopping process'))
-      } else {
-        return done()
-      }
-    })
+    attachListeners(mappingChild, done)
   })
 
-  jobs.push(function (done) {
+  jobs.push(done => {
+    if (options.ignoreAlias) return done()
+    args.log('info', `indexing alias ${inputAlias} to ${output}`)
+
+    const aliasChild = _fork([
+      '--type=alias',
+      `--input=${inputAlias}`,
+      `--output=${output}`
+    ])
+
+    attachListeners(aliasChild, done)
+  })
+
+  jobs.push(done => {
     if (options.ignoreData) return done()
-    log('info', 'indexing data ' + inputData + ' to ' + output)
+    args.log('info', `indexing data ${inputData} to ${output}`)
 
-    var dataChild = fork(path.join(__dirname, 'elasticdump'), [
-      '--type=' + 'data',
-      '--input=' + inputData,
-      '--output=' + output,
-      '--scrollTime=' + options.scrollTime,
-      '--timeout=' + options.timeout,
-      '--limit=' + options.limit,
-      '--offset=' + options.offset,
-      '--prefix=' + options.prefix,
-      '--suffix=' + options.suffix
-    ])
+    let _transform = []
 
-    dataChild.on('close', function (code) {
-      if (code !== 0) {
-        return done(new Error('CHILD PROCESS EXITED WITH ERROR.  Stopping process'))
-      } else {
-        return done()
-      }
-    })
+    if (options.transform) {
+      _transform = _.chain(options.transform)
+        .castArray()
+        .filter(_.negate(_.isEmpty))
+        .map(t => {
+          return `--transform=${t}`
+        })
+        .value()
+    }
+
+    const dataChild = _fork([
+      '--type=data',
+      `--input=${inputData}`,
+      `--output=${output}`,
+      `--scrollTime=${options.scrollTime}`,
+      `--timeout=${options.timeout}`,
+      `--limit=${options.limit}`,
+      `--offset=${options.offset}`,
+      `--prefix=${options.prefix}`,
+      `--suffix=${options.suffix}`,
+      `--support-big-int=${options['support-big-int']}`
+    ].concat(_transform))
+
+    attachListeners(dataChild, done)
   })
 
-  async.series(jobs, function (error) {
+  async.series(jobs, error => {
     if (error) {
-      log('error', error)
+      args.log('error', error)
       process.exit(1)
     } else {
       working--
